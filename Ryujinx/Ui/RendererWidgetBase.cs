@@ -115,6 +115,21 @@ namespace Ryujinx.Ui
             _lastCursorMoveTime = Stopwatch.GetTimestamp();
 
             ConfigurationState.Instance.HideCursorOnIdle.Event += HideCursorStateChanged;
+            ConfigurationState.Instance.Graphics.AntiAliasing.Event += UpdateAnriAliasing;
+            ConfigurationState.Instance.Graphics.UpscaleType.Event += UpdateUpscaleType;
+            ConfigurationState.Instance.Graphics.UpscaleLevel.Event += UpdateUpscaleLevel;
+        }
+
+        private void UpdateUpscaleLevel(object sender, ReactiveEventArgs<float> e)
+        {
+            Renderer.Window.ApplyScaler((Graphics.GAL.UpscaleType)ConfigurationState.Instance.Graphics.UpscaleType.Value);
+            Renderer.Window.SetUpscalerLevel(ConfigurationState.Instance.Graphics.UpscaleLevel.Value);
+        }
+
+        private void UpdateUpscaleType(object sender, ReactiveEventArgs<Ryujinx.Common.Configuration.UpscaleType> e)
+        {
+            Renderer.Window.ApplyScaler((Graphics.GAL.UpscaleType)ConfigurationState.Instance.Graphics.UpscaleType.Value);
+            Renderer.Window.SetUpscalerLevel(ConfigurationState.Instance.Graphics.UpscaleLevel.Value);
         }
 
         public abstract void InitializeRenderer();
@@ -148,9 +163,17 @@ namespace Ryujinx.Ui
         private void Renderer_Destroyed(object sender, EventArgs e)
         {
             ConfigurationState.Instance.HideCursorOnIdle.Event -= HideCursorStateChanged;
+            ConfigurationState.Instance.Graphics.AntiAliasing.Event -= UpdateAnriAliasing;
+            ConfigurationState.Instance.Graphics.UpscaleType.Event -= UpdateUpscaleType;
+            ConfigurationState.Instance.Graphics.UpscaleLevel.Event -= UpdateUpscaleLevel;
 
             NpadManager.Dispose();
             Dispose();
+        }
+
+        private void UpdateAnriAliasing(object sender, ReactiveEventArgs<Ryujinx.Common.Configuration.AntiAliasing> e)
+        {
+            Renderer?.Window.ApplyEffect((Graphics.GAL.AntiAliasing)e.NewValue);
         }
 
         protected override bool OnMotionNotifyEvent(EventMotion evnt)
@@ -392,6 +415,10 @@ namespace Ryujinx.Ui
             InitializeRenderer();
 
             Device.Gpu.Renderer.Initialize(_glLogLevel);
+
+            Renderer.Window.ApplyEffect((Graphics.GAL.AntiAliasing)ConfigurationState.Instance.Graphics.AntiAliasing.Value);
+            Renderer.Window.ApplyScaler((Graphics.GAL.UpscaleType)ConfigurationState.Instance.Graphics.UpscaleType.Value);
+            Renderer.Window.SetUpscalerLevel(ConfigurationState.Instance.Graphics.UpscaleLevel.Value);
 
             _gpuBackendName = GetGpuBackendName();
             _gpuVendorName = GetGpuVendorName();

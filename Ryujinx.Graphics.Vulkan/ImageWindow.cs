@@ -1,4 +1,5 @@
 ﻿using Ryujinx.Graphics.GAL;
+using Ryujinx.Graphics.Vulkan.Effects;
 using Silk.NET.Vulkan;
 using System;
 using VkFormat = Silk.NET.Vulkan.Format;
@@ -31,6 +32,14 @@ namespace Ryujinx.Graphics.Vulkan
         private int _height = SurfaceHeight;
         private bool _recreateImages;
         private int _nextImage;
+        private IPostProcessingEffect _antiAliasing;
+        private IScaler _scaler;
+        private bool _isLinear;
+        private AntiAliasing _currentEffect;
+        private bool _changeEffect;
+        private float _upscalerLevel;
+        private bool _changeScaler;
+        private UpscaleType _currentScaler;
 
         public unsafe ImageWindow(VulkanRenderer gd, PhysicalDevice physicalDevice, Device device)
         {
@@ -172,6 +181,13 @@ namespace Ryujinx.Graphics.Vulkan
 
             var view = (TextureView)texture;
 
+            UpdateEffect();
+
+            if (_antiAliasing != null)
+            {
+                view = _antiAliasing?.Run(view, cbs, _width, _height);
+            }
+
             int srcX0, srcX1, srcY0, srcY1;
             float scale = view.ScaleFactor;
 
@@ -207,6 +223,18 @@ namespace Ryujinx.Graphics.Vulkan
 
             if (ScreenCaptureRequested)
             {
+                if(_antiAliasing != null)
+                {
+                    _gd.CommandBufferPool.Return(
+                        cbs,
+                        null,
+                        stackalloc[] { PipelineStageFlags.PipelineStageColorAttachmentOutputBit },
+                        null);
+                    _gd.FlushAllCommands();
+                    cbs.GetFence().Wait();
+                    cbs = _gd.CommandBufferPool.Rent();
+                }
+
                 CaptureFrame(view, srcX0, srcY0, srcX1 - srcX0, srcY1 - srcY0, view.Info.Format.IsBgr(), crop.FlipX, crop.FlipY);
 
                 ScreenCaptureRequested = false;
@@ -227,6 +255,16 @@ namespace Ryujinx.Graphics.Vulkan
             int dstY0 = crop.FlipY ? dstPaddingY : _height - dstPaddingY;
             int dstY1 = crop.FlipY ? _height - dstPaddingY : dstPaddingY;
 
+            if (_scaler != null)
+            {
+                view = _scaler.Run(view, cbs, dstWidth, dstHeight);
+
+                srcX0 = 0;
+                srcY0 = 0;
+                srcX1 = view.Width;
+                srcY1 = view.Height;
+            }
+
             _gd.HelperShader.Blit(
                 _gd,
                 cbs,
@@ -237,7 +275,7 @@ namespace Ryujinx.Graphics.Vulkan
                 Format,
                 new Extents2D(srcX0, srcY0, srcX1, srcY1),
                 new Extents2D(dstX0, dstY1, dstX1, dstY0),
-                true,
+                _isLinear,
                 true);
 
             Transition(
@@ -278,6 +316,129 @@ namespace Ryujinx.Graphics.Vulkan
             swapBuffersCallback(info);
 
             _nextImage = (_nextImage + 1) % ImageCount;
+        }
+
+        public override void ApplyEffect(AntiAliasing effect)
+        {
+            if (_currentEffect == effect && _antiAliasing != null)
+            {
+                _currentEffect = effect;
+                return;
+            }
+
+            _currentEffect = effect;
+
+            _changeEffect = true;
+        }
+
+        public override void ApplyScaler(UpscaleType scalerType)
+        {
+
+            if (_currentScaler == scalerType && _antiAliasing != null)
+            {
+                _currentScaler = scalerType;
+                return;
+            }
+
+            _currentScaler = scalerType;
+
+            _changeScaler = true;
+        }
+
+        private void UpdateEffect()
+        {
+            if (_changeEffect)
+            {
+                _changeEffect = false;
+
+                switch (_currentEffect)
+                {
+                    case AntiAliasing.Fxaa:
+                        _antiAliasing?.Dispose();
+                        _antiAliasing = null;
+                        _antiAliasing = new FxaaPostProcessingEffect(_gd, _device);
+                        break;
+                    case AntiAliasing.None:
+                        _antiAliasing?.Dispose();
+                        _antiAliasing = null;
+                        break;
+                    case AntiAliasing.SmaaLow:
+                        if (_antiAliasing is SmaaPostProcessingEffect smaa)
+                        {
+                            smaa.Quality = 0;
+                        }
+                        else
+                        {
+                            _antiAliasing?.Dispose();
+                            _antiAliasing = new SmaaPostProcessingEffect(_gd, _device, 0);
+                        }
+                        break;
+                    case AntiAliasing.SmaaMedium:
+                        if (_antiAliasing is SmaaPostProcessingEffect smaam)
+                        {
+                            smaam.Quality = 1;
+                        }
+                        else
+                        {
+                            _antiAliasing?.Dispose();
+                            _antiAliasing = new SmaaPostProcessingEffect(_gd, _device, 1);
+                        }
+                        break;
+                    case AntiAliasing.SmaaHigh:
+                        if (_antiAliasing is SmaaPostProcessingEffect smaah)
+                        {
+                            smaah.Quality = 2;
+                        }
+                        else
+                        {
+                            _antiAliasing?.Dispose();
+                            _antiAliasing = new SmaaPostProcessingEffect(_gd, _device, 2);
+                        }
+                        break;
+                    case AntiAliasing.SmaaUltra:
+                        if (_antiAliasing is SmaaPostProcessingEffect smaau)
+                        {
+                            smaau.Quality = 3;
+                        }
+                        else
+                        {
+                            _antiAliasing?.Dispose();
+                            _antiAliasing = new SmaaPostProcessingEffect(_gd, _device, 3);
+                        }
+                        break;
+                }
+            }
+
+            if (_changeScaler)
+            {
+                _changeScaler = false;
+
+                switch (_currentScaler)
+                {
+                    case UpscaleType.Bilinear:
+                    case UpscaleType.Nearest:
+                        _scaler?.Dispose();
+                        _scaler = null;
+                        _isLinear = _currentScaler == UpscaleType.Bilinear;
+                        break;
+                    case UpscaleType.Fsr:
+                        if (!(_scaler is FsrUpscaler))
+                        {
+                            _scaler?.Dispose();
+                            _scaler = new FsrUpscaler(_gd, _device);
+                        }
+
+                        _scaler.Level = _upscalerLevel;
+                        break;
+                }
+            }
+        }
+
+        public override void SetUpscalerLevel(float level)
+        {
+            _upscalerLevel = level;
+
+            _changeScaler = true;
         }
 
         private unsafe void Transition(
@@ -350,6 +511,9 @@ namespace Ryujinx.Graphics.Vulkan
                         _images[i]?.Dispose();
                     }
                 }
+
+                _antiAliasing?.Dispose();
+                _scaler?.Dispose();
             }
         }
 

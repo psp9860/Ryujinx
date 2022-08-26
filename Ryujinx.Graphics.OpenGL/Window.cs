@@ -1,5 +1,7 @@
 using OpenTK.Graphics.OpenGL;
 using Ryujinx.Graphics.GAL;
+using Ryujinx.Graphics.OpenGL.Effects;
+using Ryujinx.Graphics.OpenGL.Effects.Smaa;
 using Ryujinx.Graphics.OpenGL.Image;
 using System;
 
@@ -16,7 +18,15 @@ namespace Ryujinx.Graphics.OpenGL
         private int _copyFramebufferHandle;
         private int _stagingFrameBuffer;
         private int[] _stagingTextures;
+        private IPostProcessingEffect _antiAliasing;
+        private IScaler _scaler;
+        private bool _isLinear;
         private int _currentTexture;
+        private AntiAliasing _currentAntiAliasing;
+        private bool _changeEffect;
+        private UpscaleType _currentScaler;
+        private float _upscalerLevel;
+        private bool _changeScaler;
 
         internal BackgroundContextWorker BackgroundContext { get; private set; }
 
@@ -96,6 +106,16 @@ namespace Ryujinx.Graphics.OpenGL
 
             TextureView viewConverted = view.Format.IsBgr() ? _renderer.TextureCopy.BgraSwap(view) : view;
 
+            UpdateEffect();
+
+            if (_antiAliasing != null)
+            {
+                viewConverted = _antiAliasing.Run(viewConverted, _width, _height);
+            }
+            
+            GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, drawFramebuffer);
+            GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, readFramebuffer);
+
             GL.FramebufferTexture(
                 FramebufferTarget.ReadFramebuffer,
                 FramebufferAttachment.ColorAttachment0,
@@ -110,12 +130,12 @@ namespace Ryujinx.Graphics.OpenGL
             GL.Clear(ClearBufferMask.ColorBufferBit);
 
             int srcX0, srcX1, srcY0, srcY1;
-            float scale = view.ScaleFactor;
+            float scale = viewConverted.ScaleFactor;
 
             if (crop.Left == 0 && crop.Right == 0)
             {
                 srcX0 = 0;
-                srcX1 = (int)(view.Width / scale);
+                srcX1 = (int)(viewConverted.Width / scale);
             }
             else
             {
@@ -126,7 +146,7 @@ namespace Ryujinx.Graphics.OpenGL
             if (crop.Top == 0 && crop.Bottom == 0)
             {
                 srcY0 = 0;
-                srcY1 = (int)(view.Height / scale);
+                srcY1 = (int)(viewConverted.Height / scale);
             }
             else
             {
@@ -164,6 +184,25 @@ namespace Ryujinx.Graphics.OpenGL
                 ScreenCaptureRequested = false;
             }
 
+            if (_scaler != null)
+            {
+                viewConverted = _scaler.Run(viewConverted, dstWidth, dstHeight);
+
+                srcX0 = 0;
+                srcY0 = 0;
+                srcX1 = viewConverted.Width;
+                srcY1 = viewConverted.Height;
+
+                GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, drawFramebuffer);
+                GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, readFramebuffer);
+
+                GL.FramebufferTexture(
+                    FramebufferTarget.ReadFramebuffer,
+                    FramebufferAttachment.ColorAttachment0,
+                    viewConverted.Handle,
+                    0);
+            }
+
             GL.BlitFramebuffer(
                 srcX0,
                 srcY0,
@@ -174,7 +213,7 @@ namespace Ryujinx.Graphics.OpenGL
                 dstX1,
                 dstY1,
                 ClearBufferMask.ColorBufferBit,
-                BlitFramebufferFilter.Linear);
+                _isLinear ? BlitFramebufferFilter.Linear : BlitFramebufferFilter.Nearest);
 
             // Remove Alpha channel
             GL.ColorMask(false, false, false, true);
@@ -254,6 +293,132 @@ namespace Ryujinx.Graphics.OpenGL
                 _stagingFrameBuffer = 0;
                 _stagingTextures = null;
             }
+
+            _antiAliasing?.Dispose();
+            _scaler?.Dispose();
+        }
+
+        public void ApplyEffect(AntiAliasing effect)
+        {
+            if (_currentAntiAliasing == effect && _antiAliasing != null)
+            {
+                _currentAntiAliasing = effect;
+                return;
+            }
+
+            _currentAntiAliasing = effect;
+
+            _changeEffect = true;
+        }
+
+        public void ApplyScaler(UpscaleType scalerType)
+        {
+
+            if (_currentScaler == scalerType && _antiAliasing != null)
+            {
+                _currentScaler = scalerType;
+                return;
+            }
+
+            _currentScaler = scalerType;
+
+            _changeScaler = true;
+        }
+
+        private void UpdateEffect()
+        {
+            if (_changeEffect)
+            {
+                _changeEffect = false;
+
+                switch (_currentAntiAliasing)
+                {
+                    case AntiAliasing.Fxaa:
+                        _antiAliasing?.Dispose();
+                        _antiAliasing = null;
+                        _antiAliasing = new FxaaPostProcessingEffect(_renderer);
+                        break;
+                    case AntiAliasing.None:
+                        _antiAliasing?.Dispose();
+                        _antiAliasing = null;
+                        break;
+                    case AntiAliasing.SmaaLow:
+                        if (_antiAliasing is SmaaPostProcessingEffect smaa)
+                        {
+                            smaa.Quality = 0;
+                        }
+                        else
+                        {
+                            _antiAliasing?.Dispose();
+                            _antiAliasing = new SmaaPostProcessingEffect(_renderer, 0);
+                        }
+                        break;
+                    case AntiAliasing.SmaaMedium:
+                        if (_antiAliasing is SmaaPostProcessingEffect smaam)
+                        {
+                            smaam.Quality = 1;
+                        }
+                        else
+                        {
+                            _antiAliasing?.Dispose();
+                            _antiAliasing = new SmaaPostProcessingEffect(_renderer, 1);
+                        }
+                        break;
+                    case AntiAliasing.SmaaHigh:
+                        if (_antiAliasing is SmaaPostProcessingEffect smaah)
+                        {
+                            smaah.Quality = 2;
+                        }
+                        else
+                        {
+                            _antiAliasing?.Dispose();
+                            _antiAliasing = new SmaaPostProcessingEffect(_renderer, 2);
+                        }
+                        break;
+                    case AntiAliasing.SmaaUltra:
+                        if (_antiAliasing is SmaaPostProcessingEffect smaau)
+                        {
+                            smaau.Quality = 3;
+                        }
+                        else
+                        {
+                            _antiAliasing?.Dispose();
+                            _antiAliasing = new SmaaPostProcessingEffect(_renderer, 3);
+                        }
+                        break;
+                }
+            }
+
+            if (_changeScaler)
+            {
+                _changeScaler = false;
+
+                switch (_currentScaler)
+                {
+                    case UpscaleType.Bilinear:
+                    case UpscaleType.Nearest:
+                        _scaler?.Dispose();
+                        _scaler = null;
+                        _isLinear = _currentScaler == UpscaleType.Bilinear;
+                        break;
+                    case UpscaleType.Fsr:
+                        if (!(_scaler is FsrUpscaler))
+                        {
+                            _scaler?.Dispose();
+                            _scaler = new FsrUpscaler(_renderer, _antiAliasing);
+                        }
+
+                        _scaler.Level = _upscalerLevel;
+                        break;
+                }
+            }
+        }
+
+        public void SetUpscalerLevel(float level)
+        {
+            _upscalerLevel = level;
+
+            _changeScaler = true;
         }
     }
 }
