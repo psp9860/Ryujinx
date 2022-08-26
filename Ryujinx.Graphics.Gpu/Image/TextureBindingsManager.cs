@@ -423,7 +423,7 @@ namespace Ryujinx.Graphics.Gpu.Image
             {
                 ref BufferBounds bounds = ref _channel.BufferManager.GetUniformBufferBounds(_isCompute, stageIndex, textureBufferIndex);
 
-                cachedTextureBuffer = MemoryMarshal.Cast<byte, int>(_channel.MemoryManager.Physical.GetSpan(bounds.Address, (int)bounds.Size));
+                cachedTextureBuffer = MemoryMarshal.Cast<byte, int>(_channel.MemoryManager.GetSpan(bounds.GpuVa, (int)bounds.Size));
                 cachedTextureBufferIndex = textureBufferIndex;
 
                 if (samplerBufferIndex == textureBufferIndex)
@@ -437,7 +437,7 @@ namespace Ryujinx.Graphics.Gpu.Image
             {
                 ref BufferBounds bounds = ref _channel.BufferManager.GetUniformBufferBounds(_isCompute, stageIndex, samplerBufferIndex);
 
-                cachedSamplerBuffer = MemoryMarshal.Cast<byte, int>(_channel.MemoryManager.Physical.GetSpan(bounds.Address, (int)bounds.Size));
+                cachedSamplerBuffer = MemoryMarshal.Cast<byte, int>(_channel.MemoryManager.GetSpan(bounds.GpuVa, (int)bounds.Size));
                 cachedSamplerBufferIndex = samplerBufferIndex;
             }
         }
@@ -563,7 +563,8 @@ namespace Ryujinx.Graphics.Gpu.Image
                     // Ensure that the buffer texture is using the correct buffer as storage.
                     // Buffers are frequently re-created to accomodate larger data, so we need to re-bind
                     // to ensure we're not using a old buffer that was already deleted.
-                    _channel.BufferManager.SetBufferTextureStorage(stage, hostTexture, texture.Range.GetSubRange(0).Address, texture.Size, bindingInfo, bindingInfo.Format, false);
+                    ulong gpuVa = descriptor.UnpackAddress();
+                    _channel.BufferManager.SetBufferTextureStorage(stage, hostTexture, gpuVa, texture.Size, bindingInfo, bindingInfo.Format, false);
                 }
                 else
                 {
@@ -695,7 +696,8 @@ namespace Ryujinx.Graphics.Gpu.Image
                         format = texture.Format;
                     }
 
-                    _channel.BufferManager.SetBufferTextureStorage(stage, hostTexture, texture.Range.GetSubRange(0).Address, texture.Size, bindingInfo, format, true);
+                    ulong gpuVa = descriptor.UnpackAddress();
+                    _channel.BufferManager.SetBufferTextureStorage(stage, hostTexture, gpuVa, texture.Size, bindingInfo, format, true);
                 }
                 else
                 {
@@ -791,11 +793,11 @@ namespace Ryujinx.Graphics.Gpu.Image
         {
             (int textureWordOffset, int samplerWordOffset, TextureHandleType handleType) = TextureHandle.UnpackOffsets(wordOffset);
 
-            ulong textureBufferAddress = _isCompute
-                ? _channel.BufferManager.GetComputeUniformBufferAddress(textureBufferIndex)
-                : _channel.BufferManager.GetGraphicsUniformBufferAddress(stageIndex, textureBufferIndex);
+            ulong textureBufferGpuVa = _isCompute
+                ? _channel.BufferManager.GetComputeUniformBufferGpuVa(textureBufferIndex)
+                : _channel.BufferManager.GetGraphicsUniformBufferGpuVa(stageIndex, textureBufferIndex);
 
-            int handle = _channel.MemoryManager.Physical.Read<int>(textureBufferAddress + (uint)textureWordOffset * 4);
+            int handle = _channel.MemoryManager.Read<int>(textureBufferGpuVa + (uint)textureWordOffset * 4);
 
             // The "wordOffset" (which is really the immediate value used on texture instructions on the shader)
             // is a 13-bit value. However, in order to also support separate samplers and textures (which uses
@@ -809,11 +811,11 @@ namespace Ryujinx.Graphics.Gpu.Image
 
                 if (handleType != TextureHandleType.SeparateConstantSamplerHandle)
                 {
-                    ulong samplerBufferAddress = _isCompute
-                        ? _channel.BufferManager.GetComputeUniformBufferAddress(samplerBufferIndex)
-                        : _channel.BufferManager.GetGraphicsUniformBufferAddress(stageIndex, samplerBufferIndex);
+                    ulong samplerBufferGpuVa = _isCompute
+                        ? _channel.BufferManager.GetComputeUniformBufferGpuVa(samplerBufferIndex)
+                        : _channel.BufferManager.GetGraphicsUniformBufferGpuVa(stageIndex, samplerBufferIndex);
 
-                    samplerHandle = _channel.MemoryManager.Physical.Read<int>(samplerBufferAddress + (uint)samplerWordOffset * 4);
+                    samplerHandle = _channel.MemoryManager.Read<int>(samplerBufferGpuVa + (uint)samplerWordOffset * 4);
                 }
                 else
                 {
